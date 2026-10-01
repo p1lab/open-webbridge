@@ -145,6 +145,15 @@ class OpenWebBridgeExtension {
           },
         })
       );
+
+      if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = setInterval(() => {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          try {
+            this.ws.send(JSON.stringify({ type: 'ping' }));
+          } catch (e) {}
+        }
+      }, 15000);
     };
 
     this.ws.onmessage = async (event) => {
@@ -158,6 +167,10 @@ class OpenWebBridgeExtension {
 
     this.ws.onclose = () => {
       console.warn('[OpenWebBridge] WebSocket disconnected.');
+      if (this.heartbeatTimer) {
+        clearInterval(this.heartbeatTimer);
+        this.heartbeatTimer = null;
+      }
       this.connected = false;
       this.ws = null;
       this.scheduleReconnect();

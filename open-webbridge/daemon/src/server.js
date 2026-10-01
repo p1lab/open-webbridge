@@ -82,6 +82,16 @@ class OpenWebBridgeServer {
         });
       });
 
+      this.heartbeatTimer = setInterval(() => {
+        for (const conn of this.sessionManager.browserConnections.values()) {
+          if (conn.ws && conn.ws.readyState === 1) {
+            try {
+              conn.ws.send(JSON.stringify({ type: 'ping' }));
+            } catch (e) {}
+          }
+        }
+      }, 15000);
+
       this.httpServer.listen(this.port, this.host, () => {
         console.log(`[Daemon] OpenWebBridge listening on http://${this.host}:${this.port}`);
         resolve({ port: this.port, host: this.host });
@@ -95,6 +105,10 @@ class OpenWebBridgeServer {
 
   async stop() {
     return new Promise((resolve) => {
+      if (this.heartbeatTimer) {
+        clearInterval(this.heartbeatTimer);
+        this.heartbeatTimer = null;
+      }
       if (this.wss) {
         this.wss.close();
       }
