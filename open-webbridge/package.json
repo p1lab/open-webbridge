@@ -1,0 +1,19 @@
+{
+  "name": "open-webbridge",
+  "version": "1.0.0",
+  "description": "OpenWebBridge - In-Situ AI Agent Browser Companion",
+  "main": "cli/open-webbridge.js",
+  "bin": {
+    "open-webbridge": "cli/open-webbridge.js"
+  },
+  "scripts": {
+    "start": "node daemon/index.js start",
+    "status": "node daemon/index.js status",
+    "stop": "node daemon/index.js stop",
+    "test": "node tests/daemon.test.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "license": "MIT"
+}

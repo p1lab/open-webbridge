@@ -1,0 +1,16 @@
+{
+  "name": "open-webbridge-daemon",
+  "version": "1.0.0",
+  "description": "High performance local daemon and WebSocket bridge for OpenWebBridge",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js start",
+    "status": "node index.js status",
+    "stop": "node index.js stop"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "author": "OpenWebBridge Authors",
+  "license": "MIT"
+}

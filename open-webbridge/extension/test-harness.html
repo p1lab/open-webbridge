@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>OpenWebBridge 协同测试沙盒</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      max-width: 800px;
+      margin: 40px auto;
+      padding: 20px;
+      line-height: 1.6;
+      color: #333;
+    }
+    h1 { color: #1e40af; }
+    .card {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 20px;
+    }
+    .form-item {
+      margin-bottom: 12px;
+    }
+    label {
+      display: block;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    input[type="text"], textarea, select {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #cbd5e1;
+      border-radius: 4px;
+      box-sizing: border-box;
+    }
+    .rich-editor {
+      min-height: 80px;
+      padding: 10px;
+      border: 2px dashed #94a3b8;
+      border-radius: 6px;
+      background: #ffffff;
+      outline: none;
+    }
+    .rich-editor:focus {
+      border-color: #3b82f6;
+    }
+    button {
+      background: #2563eb;
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button:hover { background: #1d4ed8; }
+    #log {
+      background: #0f172a;
+      color: #38bdf8;
+      padding: 12px;
+      border-radius: 6px;
+      font-family: monospace;
+      font-size: 13px;
+      height: 120px;
+      overflow-y: auto;
+    }
+  </style>
+</head>
+<body>
+  <h1>OpenWebBridge 自动化与人机协同测试沙盒</h1>
+  <p>本页面用于测试 Agent 驱动 Chrome/Edge 扩展时的无障碍树提取、点击定位、原生输入以及复杂富文本编辑器编辑能力。</p>
+
+  <div class="card">
+    <h3>1. 表单与原生输入测试</h3>
+    <div class="form-item">
+      <label for="username">用户名 (Native Input)</label>
+      <input type="text" id="username" placeholder="输入用户名...">
+    </div>
+    <div class="form-item">
+      <label for="bio">个人简介 (Native Textarea)</label>
+      <textarea id="bio" rows="3" placeholder="填写个人简介..."></textarea>
+    </div>
+    <div class="form-item">
+      <label for="role">角色选择 (Select)</label>
+      <select id="role">
+        <option value="developer">开发者</option>
+        <option value="researcher">研究员</option>
+        <option value="manager">产品经理</option>
+      </select>
+    </div>
+    <button id="btn-submit">提交表单 (Submit Button)</button>
+  </div>
+
+  <div class="card">
+    <h3>2. 富文本编辑器测试 (contenteditable)</h3>
+    <p style="font-size: 13px; color: #64748b;">模拟现代编辑器（TipTap / ProseMirror / Lexical / Notion 式输入）</p>
+    <div id="rich-editor" class="rich-editor" contenteditable="true">
+      这里是一段<b>可编辑</b>的富文本，等待 Agent 写入内容...
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>3. 实时交互事件日志</h3>
+    <div id="log">等待交互事件...</div>
+  </div>
+
+  <script>
+    const logBox = document.getElementById('log');
+    function logEvent(msg) {
+      const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      logBox.innerHTML += `<div>${line}</div>`;
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    document.getElementById('btn-submit').addEventListener('click', () => {
+      const user = document.getElementById('username').value;
+      const role = document.getElementById('role').value;
+      logEvent(`点击了提交按钮！用户名: "${user}", 角色: "${role}"`);
+    });
+
+    document.getElementById('username').addEventListener('input', (e) => {
+      logEvent(`Native Input 用户名变更: ${e.target.value}`);
+    });
+
+    document.getElementById('rich-editor').addEventListener('input', (e) => {
+      logEvent(`富文本 contenteditable 变更: ${e.target.innerText}`);
+    });
+  </script>
+</body>
+</html>
