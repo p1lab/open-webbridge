@@ -32,9 +32,15 @@ class OpenWebBridgeExtension {
     console.log('[OpenWebBridge] Initializing service worker...');
 
     // Load saved config
-    const data = await chrome.storage.local.get(['wsUrl']);
+    const data = await chrome.storage.local.get(['wsUrl', 'profileName', 'browserId']);
     if (data.wsUrl) {
       this.wsUrl = data.wsUrl;
+    }
+    if (data.profileName) {
+      this.profileName = data.profileName;
+    }
+    if (data.browserId) {
+      this.browserId = data.browserId;
     }
 
     // Set keep-alive alarm for Manifest V3
@@ -117,12 +123,25 @@ class OpenWebBridgeExtension {
       console.log('[OpenWebBridge] WebSocket connected to daemon.');
       this.connected = true;
       this.reconnectAttempt = 0;
+
+      const ua = (typeof navigator !== 'undefined' && navigator.userAgent) || '';
+      const isEdge = ua.includes('Edg/');
+      const browserType = isEdge ? 'edge' : 'chrome';
+      const profileName = this.profileName || 'Default';
+      const browserId = this.browserId || browserType;
+
       this.ws.send(
         JSON.stringify({
           type: 'hello',
           payload: {
             extensionVersion: chrome.runtime.getManifest().version,
-            name: 'OpenWebBridge',
+            name: isEdge ? `OpenWebBridge (Edge - ${profileName})` : `OpenWebBridge (Chrome - ${profileName})`,
+            browser: browserType,
+            browserType,
+            profile: profileName,
+            profileName,
+            browserId,
+            userAgent: ua,
           },
         })
       );
@@ -309,6 +328,8 @@ class OpenWebBridgeExtension {
         return await this.toolNetwork(tabId, args);
       case 'wait':
         return await this.toolWait(tabId, args);
+      case 'handoff':
+        return await this.toolHandoff(tabId, args);
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -454,13 +475,118 @@ class OpenWebBridgeExtension {
 
   // --- Accessibility Tree & Ref Indexing (Snapshot) ---
 
-  async toolSnapshot(tabId, args) {
+  async toolSnapshot(tabId, args = {}) {
     if (!tabId) throw new Error('snapshot: no active tab selected');
     await this.ensureDebugger(tabId);
 
     const tab = await chrome.tabs.get(tabId);
     const axData = await this.sendCDP(tabId, 'Accessibility.getFullAXTree');
     const nodes = axData.nodes || [];
+
+    const inViewportOnly = Boolean(args.inViewportOnly || args.in_viewport_only);
+    const interactiveOnly = Boolean(args.interactiveOnly || args.interactive);
+    const selector = args.selector;
+
+    // 1. Container scope filter: if selector is provided, collect DOM backendNodeIds within target container
+    let scopedBackendNodeIds = null;
+    if (selector) {
+      try {
+        const { objectId } = await this.resolveTarget(tabId, selector);
+        const domTree = await this.sendCDP(tabId, 'DOM.describeNode', { objectId, depth: -1 });
+        if (domTree?.node) {
+          scopedBackendNodeIds = new Set();
+          const collectIds = (n) => {
+            if (n.backendNodeId) scopedBackendNodeIds.add(n.backendNodeId);
+            if (n.children && Array.isArray(n.children)) {
+              for (const c of n.children) collectIds(c);
+            }
+            if (n.shadowRoots && Array.isArray(n.shadowRoots)) {
+              for (const s of n.shadowRoots) collectIds(s);
+            }
+            if (n.contentDocument) {
+              collectIds(n.contentDocument);
+            }
+          };
+          collectIds(domTree.node);
+        }
+      } catch (err) {
+        throw new Error(`snapshot: container element not found or invalid for selector "${selector}": ${err.message}`);
+      }
+    }
+
+    // 2. Viewport metrics and visibility check if inViewportOnly is requested
+    let visibleBackendNodeIds = null;
+    if (inViewportOnly) {
+      let vw = 1920, vh = 1080;
+      let scrollX = 0, scrollY = 0;
+      try {
+        const metrics = await this.sendCDP(tabId, 'Page.getLayoutMetrics');
+        vw = metrics.visualViewport?.clientWidth || metrics.layoutViewport?.clientWidth || 1920;
+        vh = metrics.visualViewport?.clientHeight || metrics.layoutViewport?.clientHeight || 1080;
+        scrollX = metrics.visualViewport?.pageX ?? metrics.layoutViewport?.pageX ?? 0;
+        scrollY = metrics.visualViewport?.pageY ?? metrics.layoutViewport?.pageY ?? 0;
+      } catch (e) {
+        try {
+          const win = await this.sendCDP(tabId, 'Runtime.evaluate', {
+            expression: '({ w: window.innerWidth, h: window.innerHeight, sx: window.scrollX || 0, sy: window.scrollY || 0 })',
+            returnByValue: true,
+          });
+          if (win.result?.value) {
+            vw = win.result.value.w || 1920;
+            vh = win.result.value.h || 1080;
+            scrollX = win.result.value.sx || 0;
+            scrollY = win.result.value.sy || 0;
+          }
+        } catch (err) {}
+      }
+
+      const isInsideViewport = (border, sx, sy, viewportWidth, viewportHeight) => {
+        // Support backwards-compatible 3-argument call: isInsideViewport(border, vw, vh)
+        if (viewportWidth === undefined && viewportHeight === undefined) {
+          viewportWidth = sx;
+          viewportHeight = sy;
+          sx = 0;
+          sy = 0;
+        }
+        const xs = [border[0], border[2], border[4], border[6]];
+        const ys = [border[1], border[3], border[5], border[7]];
+        const minX = Math.min(...xs), maxX = Math.max(...xs);
+        const minY = Math.min(...ys), maxY = Math.max(...ys);
+        return (
+          maxX > sx &&
+          minX < sx + viewportWidth &&
+          maxY > sy &&
+          minY < sy + viewportHeight
+        );
+      };
+
+      const candidateBackendIdsSet = new Set();
+      for (const node of nodes) {
+        if (!node.ignored && node.backendDOMNodeId) {
+          if (!scopedBackendNodeIds || scopedBackendNodeIds.has(node.backendDOMNodeId)) {
+            candidateBackendIdsSet.add(node.backendDOMNodeId);
+          }
+        }
+      }
+      const candidateBackendIds = Array.from(candidateBackendIdsSet);
+
+      visibleBackendNodeIds = new Set();
+      const chunkSize = 25;
+      for (let i = 0; i < candidateBackendIds.length; i += chunkSize) {
+        const chunk = candidateBackendIds.slice(i, i + chunkSize);
+        await Promise.all(
+          chunk.map(async (backendId) => {
+            try {
+              const boxRes = await this.sendCDP(tabId, 'DOM.getBoxModel', { backendNodeId: backendId });
+              const border = boxRes?.model?.border;
+              if (border && border.length >= 8 && isInsideViewport(border, scrollX, scrollY, vw, vh)) {
+                visibleBackendNodeIds.add(backendId);
+              }
+            } catch (e) {}
+          })
+        );
+      }
+    }
 
     const refMap = new Map();
     let refCounter = 1;
@@ -475,13 +601,25 @@ class OpenWebBridgeExtension {
 
     for (const node of nodes) {
       if (node.ignored) continue;
+
+      // Container scope filter
+      if (scopedBackendNodeIds && (!node.backendDOMNodeId || !scopedBackendNodeIds.has(node.backendDOMNodeId))) {
+        continue;
+      }
+
+      // Viewport pruning filter
+      if (inViewportOnly && (!node.backendDOMNodeId || !visibleBackendNodeIds.has(node.backendDOMNodeId))) {
+        continue;
+      }
+
       const role = node.role?.value || '';
       const name = node.name?.value || '';
       const value = node.value?.value || '';
       const description = node.description?.value || '';
 
-      const isInteractive = interactiveRoles.has(role.toLowerCase()) || node.backendDOMNodeId;
+      const isInteractive = interactiveRoles.has(role.toLowerCase()) || Boolean(node.backendDOMNodeId);
 
+      if (interactiveOnly && !isInteractive) continue;
       if (!name && !value && !isInteractive) continue;
 
       let refTag = '';
@@ -512,6 +650,8 @@ class OpenWebBridgeExtension {
       title: tab.title,
       tree: formattedLines.join('\n'),
       totalElements: refMap.size,
+      inViewportOnly,
+      scoped: Boolean(selector),
     };
   }
 
@@ -739,6 +879,208 @@ class OpenWebBridgeExtension {
     }
 
     throw new Error(`wait timed out after ${timeout}ms`);
+  }
+
+  async toolHandoff(tabId, args = {}) {
+    if (!tabId) throw new Error('handoff: no active tab selected');
+    await this.ensureDebugger(tabId);
+    const { reason = 'captcha', timeout = 120, selector } = args;
+    const timeoutMs = timeout * 1000;
+    const startTime = Date.now();
+
+    // 1. Inject visual banner and optional chime into page
+    const safeReason = JSON.stringify(String(reason));
+    const injectCode = `(() => {
+      const existing = document.getElementById('owb-handoff-banner');
+      if (existing) existing.remove();
+
+      const banner = document.createElement('div');
+      banner.id = 'owb-handoff-banner';
+      banner.style.cssText = [
+        'position: fixed',
+        'top: 12px',
+        'left: 50%',
+        'transform: translateX(-50%)',
+        'z-index: 2147483647',
+        'background: rgba(15, 23, 42, 0.95)',
+        'color: #ffffff',
+        'padding: 12px 24px',
+        'border-radius: 12px',
+        'box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 0 0 2px #3b82f6',
+        'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+        'font-size: 14px',
+        'display: flex',
+        'align-items: center',
+        'gap: 16px',
+        'backdrop-filter: blur(8px)',
+        'pointer-events: auto'
+      ].join(';');
+
+      const msg = document.createElement('div');
+      const strong = document.createElement('strong');
+      strong.textContent = '🛡️ [OpenWebBridge 接管中] ';
+      const textSpan = document.createElement('span');
+      textSpan.textContent = '遇到：' + ${safeReason} + '。请在浏览器中手动完成操作。';
+      msg.appendChild(strong);
+      msg.appendChild(textSpan);
+
+      const btn = document.createElement('button');
+      btn.textContent = '已完成，恢复执行';
+      btn.style.cssText = [
+        'background: #2563eb',
+        'color: white',
+        'border: none',
+        'border-radius: 6px',
+        'padding: 6px 14px',
+        'font-size: 13px',
+        'font-weight: 600',
+        'cursor: pointer',
+        'transition: background 0.2s'
+      ].join(';');
+      btn.onclick = () => {
+        window.__owb_handoff_resolved = true;
+        banner.remove();
+      };
+
+      banner.appendChild(msg);
+      banner.appendChild(btn);
+      document.body.appendChild(banner);
+
+      window.__owb_handoff_resolved = false;
+
+      // Attempt gentle audio chime
+      try {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtx) {
+          const ctx = new AudioCtx();
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+          osc.frequency.setValueAtTime(880, ctx.currentTime + 0.15);
+          gain.gain.setValueAtTime(0.15, ctx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.4);
+          osc.start();
+          osc.stop(ctx.currentTime + 0.4);
+        }
+      } catch (e) {}
+    })()`;
+
+    try {
+      await this.sendCDP(tabId, 'Runtime.evaluate', { expression: injectCode });
+    } catch (e) {
+      console.warn('[OpenWebBridge] Banner injection failed:', e.message);
+    }
+
+    const initialTab = await chrome.tabs.get(tabId).catch(() => null);
+    const initialUrl = initialTab?.url || '';
+
+    // 2. Poll until resolved, URL changed, selector disappeared/hidden, or timeout
+    let resolved = false;
+    let resolveMethod = null;
+    let selectorSeen = false;
+
+    while (Date.now() - startTime < timeoutMs) {
+      const currentTab = await chrome.tabs.get(tabId).catch(() => null);
+      if (!currentTab) {
+        throw new Error('handoff: target tab was closed during handoff');
+      }
+
+      // Check if manual resolve button was clicked
+      try {
+        const checkRes = await this.sendCDP(tabId, 'Runtime.evaluate', {
+          expression: 'Boolean(window.__owb_handoff_resolved)',
+          returnByValue: true,
+        });
+        if (checkRes.result?.value) {
+          resolved = true;
+          resolveMethod = 'manual_button';
+          break;
+        }
+      } catch (e) {}
+
+      // Check if URL changed
+      if (currentTab.url && currentTab.url !== initialUrl) {
+        resolved = true;
+        resolveMethod = 'url_changed';
+        break;
+      }
+
+      // If specific selector was given (e.g. slider container), check if it was seen and then disappeared/hidden
+      if (selector) {
+        try {
+          const checkSel = await this.sendCDP(tabId, 'Runtime.evaluate', {
+            expression: `(() => {
+              const el = document.querySelector(${JSON.stringify(selector)});
+              if (!el) return false;
+              const style = window.getComputedStyle(el);
+              if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+              const rect = el.getBoundingClientRect();
+              if (rect.width === 0 && rect.height === 0) return false;
+              return true;
+            })()`,
+            returnByValue: true,
+          });
+          const isPresent = Boolean(checkSel.result?.value);
+          if (isPresent) {
+            selectorSeen = true;
+          } else if (selectorSeen) {
+            resolved = true;
+            resolveMethod = 'selector_disappeared';
+            break;
+          }
+        } catch (e) {}
+      }
+
+      await new Promise((r) => setTimeout(r, 600));
+    }
+
+    // Cleanup banner if still present
+    try {
+      await this.sendCDP(tabId, 'Runtime.evaluate', {
+        expression: `(() => {
+          const el = document.getElementById('owb-handoff-banner');
+          if (el) el.remove();
+        })()`,
+      });
+    } catch (e) {}
+
+    if (!resolved) {
+      throw new Error(`handoff: timed out after ${timeout} seconds waiting for human intervention`);
+    }
+
+    const ua = (typeof navigator !== 'undefined' && navigator.userAgent) || '';
+    const isEdge = ua.includes('Edg/');
+    const browserType = isEdge ? 'edge' : 'chrome';
+    const browserId = this.browserId || browserType;
+
+    // Send handoff_resolved event to daemon
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(
+        JSON.stringify({
+          type: 'handoff_resolved',
+          payload: {
+            tabId,
+            reason,
+            resolveMethod,
+            resolved: true,
+            browser: browserId,
+            browserId,
+            browserType,
+          },
+        })
+      );
+    }
+
+    return {
+      success: true,
+      resolved: true,
+      reason,
+      resolveMethod,
+      tabId,
+      browser: browserId,
+    };
   }
 
   handleCDPEvent(source, method, params) {

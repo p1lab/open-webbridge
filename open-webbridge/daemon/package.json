@@ -1,14 +1,16 @@
 {
   "name": "open-webbridge-daemon",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "High performance local daemon and WebSocket bridge for OpenWebBridge",
   "main": "index.js",
   "scripts": {
     "start": "node index.js start",
     "status": "node index.js status",
-    "stop": "node index.js stop"
+    "stop": "node index.js stop",
+    "mcp": "node index.js mcp"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "ws": "^8.18.0"
   },
   "author": "OpenWebBridge Authors",

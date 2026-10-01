@@ -94,17 +94,24 @@ if (command === 'status') {
   stopDaemon();
 } else if (command === 'start') {
   runForeground(portArg);
+} else if (command === 'mcp') {
+  const { startMcpServer } = require('./src/mcp-server');
+  startMcpServer({ port: portArg }).catch((err) => {
+    console.error('[MCP] Fatal MCP server error:', err);
+    process.exit(1);
+  });
 } else {
   console.log(`
-OpenWebBridge Daemon CLI
+OpenWebBridge Daemon CLI v2.0
 
 Usage:
   node index.js [command] [options]
 
 Commands:
   start       Start daemon server (default foreground)
-  status      Query daemon status
+  status      Query daemon status & connected browsers
   stop        Stop running background daemon
+  mcp         Start native Model Context Protocol (MCP) server over stdio
 
 Options:
   --port <N>  Specify listening port (default: 10087)

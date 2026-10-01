@@ -6,7 +6,7 @@ class OpenWebBridgeServer {
   constructor(options = {}) {
     this.port = options.port || 10087;
     this.host = options.host || '127.0.0.1';
-    this.version = options.version || '1.0.0';
+    this.version = options.version || '2.0.0';
     this.startTime = Date.now();
 
     this.sessionManager = new SessionManager();
@@ -34,21 +34,38 @@ class OpenWebBridgeServer {
 
       this.wss.on('connection', (ws) => {
         console.log('[Daemon] Extension WebSocket connected.');
-        this.sessionManager.setExtensionSocket(ws);
 
         ws.on('message', (data) => {
           try {
             const msg = JSON.parse(data.toString());
             if (msg.type === 'hello') {
-              this.sessionManager.setExtensionSocket(ws, {
-                version: msg.payload?.extensionVersion || '1.0.0',
-                name: msg.payload?.name || 'OpenWebBridge',
-              });
-              ws.send(JSON.stringify({ type: 'hello_ack', version: this.version }));
+              const conn = this.sessionManager.registerBrowserConnection(ws, msg.payload || {});
+              ws.send(
+                JSON.stringify({
+                  type: 'hello_ack',
+                  version: this.version,
+                  browserId: conn.browserId,
+                  browserType: conn.browserType,
+                })
+              );
             } else if (msg.type === 'ping') {
               ws.send(JSON.stringify({ type: 'pong' }));
             } else if (msg.type === 'tool_result') {
               this.sessionManager.handleExtensionMessage(msg);
+            } else if (msg.type === 'handoff_resolved') {
+              const payload = msg.payload || {};
+              if (!payload.browser) {
+                for (const conn of this.sessionManager.browserConnections.values()) {
+                  if (conn.ws === ws) {
+                    payload.browser = conn.browserId;
+                    payload.browserId = conn.browserId;
+                    payload.browserType = conn.browserType;
+                    break;
+                  }
+                }
+              }
+              console.log('[Daemon] Handoff resolved notification received:', payload);
+              this.sessionManager.emit('handoff_resolved', payload);
             }
           } catch (e) {
             console.error('[Daemon] Error processing WS message:', e);
@@ -57,7 +74,7 @@ class OpenWebBridgeServer {
 
         ws.on('close', () => {
           console.log('[Daemon] Extension WebSocket disconnected.');
-          this.sessionManager.removeExtensionSocket(ws);
+          this.sessionManager.removeBrowserConnection(ws);
         });
 
         ws.on('error', (err) => {
@@ -106,14 +123,17 @@ class OpenWebBridgeServer {
     }
 
     if (url.pathname === '/status' && req.method === 'GET') {
-      const isConnected = this.sessionManager.isExtensionConnected();
+      const statusInfo = this.sessionManager.getStatusInfo();
       const statusData = {
         running: true,
         port: this.port,
         version: this.version,
         uptime_seconds: Math.floor((Date.now() - this.startTime) / 1000),
-        extension_connected: isConnected,
-        extension_version: isConnected ? this.sessionManager.extensionInfo?.version || '1.0.0' : '',
+        extension_connected: statusInfo.extension_connected,
+        extension_version: statusInfo.extension_version || '2.0.0',
+        browser_count: statusInfo.browser_count,
+        active_browser: statusInfo.active_browser,
+        browsers: statusInfo.browsers,
       };
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(statusData, null, 2));
@@ -129,7 +149,7 @@ class OpenWebBridgeServer {
       req.on('end', async () => {
         try {
           const json = JSON.parse(body);
-          const { action, args = {}, session = 'default' } = json;
+          const { action, args = {}, session = 'default', browser } = json;
 
           if (!action) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -137,7 +157,11 @@ class OpenWebBridgeServer {
             return;
           }
 
-          const result = await this.sessionManager.executeCommand(action, args, session);
+          const targetBrowser = browser || args.browser;
+          const timeoutMs = args.timeout
+            ? Math.max(60000, parseInt(args.timeout, 10) * 1000 + 5000)
+            : 60000;
+          const result = await this.sessionManager.executeCommand(action, args, session, timeoutMs, targetBrowser);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, data: result }));
         } catch (err) {
